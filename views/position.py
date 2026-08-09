@@ -41,14 +41,18 @@ sig = get_current_signal()
 
 st.title("현재 포지션")
 
+if sig is None:
+    st.warning("백테스트 DB가 없습니다. 먼저 `backtest.py`를 실행해주세요.")
+    st.stop()
+
 asset_kr = TICKER_KR.get(sig["asset"], sig["asset"])
 st.markdown(
     f"""
     <div class="ic-pos-card">
-    <div class="ic-pos-title">📅 최신 신호 ({sig['date']})</div>
+    <div class="ic-pos-title">📅 최신 월말 결정 ({sig['decision_date']})</div>
     <div class="ic-pos-regime">{sig['signal']} · {risk_mode_label(sig['risk_score'])}</div>
     <div class="ic-pos-asset">{asset_kr} ({sig['asset']}) {sig['leverage']:.1f}x</div>
-    <div class="ic-pos-note">위험 점수 {sig['risk_score']} / 4 · 최신 데이터 기준</div>
+    <div class="ic-pos-note">보유기간 ~ {sig['period_end']} · 위험 점수 {sig['risk_score']} / 4</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -62,19 +66,7 @@ st.markdown(
     - **TIP (통화)**: {fmt_score(c['TIP']['score'])} → {'🚨 위험' if c['TIP']['risk'] else '정상'}
     - **EEM (자본)**: {fmt_score(c['EEM']['score'])} → {'🚨 위험' if c['EEM']['risk'] else '정상'}
     - **HYG/IEF (신용)**: {fmt_score(c['HYGIEF']['score'])} → {'🚨 위험' if c['HYGIEF']['risk'] else '정상'}
+    - **T10Y2Y (금리차)**: {fmt_score(c['T10Y2Y']['score'])} → {'🚨 위험' if c['T10Y2Y']['risk'] else '정상'}
     """
 )
-st.caption("위험 점수 ≥ 2 → Risk-Off. 카나리아 3개(2/4 다수결의 축약) 기준.")
-
-st.markdown("")
-st.markdown("#### 자산군 모멘텀 진단")
-if sig["signal"] in ("RISK-ON 2x", "RISK-ON 1x"):
-    st.markdown(
-        f"**공격 2위 자산**: {sig['rank2_asset']} ({TICKER_KR.get(sig['rank2_asset'], sig['rank2_asset'])}) "
-        f"· 모멘텀 {fmt_score(sig['rank2_score'])}"
-    )
-else:
-    st.markdown(
-        f"**방어 1위 자산**: {sig['defense_asset']} ({fmt_score(sig['defense_score'])}) "
-        f"vs BIL ({fmt_score(sig['bil_score'])}) → 격차 {fmt_score(sig['gap'])}"
-    )
+st.caption("위험 점수 ≥ 2 → Risk-Off. 4대 카나리아(2/4 다수결) 기준. 백테스트 DB의 최신 월말 결정입니다.")

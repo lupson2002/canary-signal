@@ -16,13 +16,14 @@ Strategy (from analyzer.py):
 import sqlite3
 from pathlib import Path
 
+import FinanceDataReader as fdr
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 from config import (
     ASSET_CASH, ASSET_DEFENSE_LIST, ASSET_OFFENSE_LIST,
-    GAP_THRESHOLD, LEVERAGE_RISK_0, LEVERAGE_RISK_1,
+    FRED_T10Y2Y, GAP_THRESHOLD, LEVERAGE_RISK_0, LEVERAGE_RISK_1,
     LOOKBACK, RISK_THRESHOLD, TICKER_EEM, TICKER_HYG, TICKER_IEF, TICKER_TIP,
     W_R1, W_R12, W_R3, W_R6,
 )
@@ -61,17 +62,27 @@ def momentum_13612w(series: pd.Series) -> float | None:
 
 
 def load_data(start_date=START_DATE):
-    """Download daily closes for all tickers. Returns daily close DataFrame."""
+    """Download daily closes for all tickers + FRED T10Y2Y. Returns (close, t10y2y).
+
+    Uses ffill only (no bfill) to avoid lookahead bias: missing values are carried
+    forward from the past, never backfilled from the future.
+    """
     df = yf.download(ALL_TICKERS, start=start_date, auto_adjust=True, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         close = df["Close"] if "Close" in df.columns.levels[0] else df.xs(df.columns.levels[0][0], axis=1, level=0)
     else:
         close = df
-    close = close.ffill().bfill()
-    return close
+    close = close.ffill()
+
+    t10 = fdr.DataReader(FRED_T10Y2Y, start_date)
+    if isinstance(t10, pd.DataFrame):
+        t10 = t10.iloc[:, 0]
+    t10 = t10.astype(float).ffill()
+    t10 = t10.reindex(close.index).ffill()
+    return close, t10
 
 
-def compute_decision(prices: pd.DataFrame, date_idx: int) -> dict:
+def compute_decision(prices: pd.DataFrame, t10y2y: pd.Series, date_idx: int) -> dict:
     """Compute the MQC-HAA decision as of prices.iloc[:date_idx+1].
 
     Returns dict with signal, asset, leverage, risk_score, rank2, defense, gap.
@@ -88,11 +99,15 @@ def compute_decision(prices: pd.DataFrame, date_idx: int) -> dict:
         m_hief = momentum_13612w(ratio)
     else:
         m_hief = None
+    t10_hist = t10y2y.iloc[: date_idx + 1]
+    t10_last = float(t10_hist.iloc[-1]) if len(t10_hist) > 0 else None
 
+    # fail-closed: None → 위험 1점
     risk_tip = (m_tip is None) or (m_tip < 0)
     risk_eem = (m_eem is None) or (m_eem < 0)
     risk_hief = (m_hief is None) or (m_hief < 0)
-    risk_score = int(risk_tip) + int(risk_eem) + int(risk_hief)
+    risk_t10 = (t10_last is None) or (t10_last < 0)
+    risk_score = int(risk_tip) + int(risk_eem) + int(risk_hief) + int(risk_t10)
     is_risk_off = risk_score >= RISK_THRESHOLD
 
     signal = asset = leverage = None
@@ -144,42 +159,65 @@ def compute_decision(prices: pd.DataFrame, date_idx: int) -> dict:
         "risk_score": risk_score, "rank2_asset": rank2_asset,
         "rank2_score": rank2_score, "defense_asset": defense_asset,
         "defense_score": defense_score, "bil_score": bil_score, "gap": gap,
+        "canaries": {
+            "TIP": m_tip, "EEM": m_eem, "HYGIEF": m_hief, "T10Y2Y": t10_last,
+        },
     }
 
 
-def build_positions(prices: pd.DataFrame):
-    """Daily decision -> list of (decision_date, next_date, signal, asset, leverage)."""
+def build_positions(prices: pd.DataFrame, t10y2y: pd.Series):
+    """Monthly decision -> list of (decision_date, period_end, signal, asset, leverage).
+
+    Decision is made at each month-end (using data up to that day) and held for the
+    following month. This avoids the excessive daily turnover of the live monitor.
+    """
+    month_ends = prices.index.to_series().groupby([prices.index.year, prices.index.month]).last()
     positions = []
-    for i in range(MIN_LEN, len(prices) - 1):
-        dec = compute_decision(prices, i)
-        decision_date = prices.index[i]
-        next_date = prices.index[i + 1]
-        positions.append((decision_date, next_date, dec))
+    for i in range(len(month_ends) - 1):
+        decision_date = month_ends.iloc[i]
+        period_end = month_ends.iloc[i + 1]
+        date_idx = prices.index.get_loc(decision_date)
+        dec = compute_decision(prices, t10y2y, date_idx)
+        positions.append((decision_date, period_end, dec))
     return positions
 
 
 def simulate(positions, prices):
-    """Daily return path (1x notional, leverage applied to the held asset)."""
+    """Daily return path (leverage applied to the held asset over the holding month)."""
     returns = prices.pct_change()
     daily_ret = pd.Series(0.0, index=prices.index)
-    for decision_date, next_date, dec in positions:
+    for decision_date, period_end, dec in positions:
         asset = dec["asset"]
         lev = dec["leverage"]
-        if asset in returns.columns:
-            daily_ret.loc[next_date] = returns.loc[next_date, asset] * lev
+        if asset not in returns.columns:
+            continue
+        mask = (returns.index > decision_date) & (returns.index <= period_end)
+        daily_ret.loc[mask] = returns.loc[mask, asset] * lev
     start = positions[0][0]
     end = positions[-1][1]
     return daily_ret.loc[start:end]
 
 
 def compute_turnover(positions):
+    """Turnover = total notional traded at each rebalance.
+
+    Position notional = leverage (asset is always 100% weight). When the asset
+    changes we sell the old notional and buy the new notional (sum). When only the
+    leverage changes on the same asset we trade the difference (|new - prev|).
+    """
     turnover = []
     prev_asset = None
-    for decision_date, next_date, dec in positions:
+    prev_lev = 0.0
+    for decision_date, period_end, dec in positions:
         asset = dec["asset"]
-        t = 1.0 if asset != prev_asset else 0.0
+        lev = dec["leverage"]
+        if asset != prev_asset:
+            t = prev_lev + lev
+        else:
+            t = abs(lev - prev_lev)
         turnover.append((decision_date, t))
         prev_asset = asset
+        prev_lev = lev
     return turnover
 
 
@@ -214,15 +252,15 @@ def yearly_returns(daily_ret):
 def build_weights_df(positions, index):
     tickers = sorted(set(p[2]["asset"] for p in positions))
     weights_df = pd.DataFrame(0.0, index=index, columns=tickers)
-    for decision_date, next_date, dec in positions:
-        mask = (index > decision_date) & (index <= next_date)
-        weights_df.loc[mask, dec["asset"]] = 1.0
+    for decision_date, period_end, dec in positions:
+        mask = (index > decision_date) & (index <= period_end)
+        weights_df.loc[mask, dec["asset"]] = dec["leverage"]
     return weights_df
 
 
 def main():
-    prices = load_data()
-    positions = build_positions(prices)
+    prices, t10y2y = load_data()
+    positions = build_positions(prices, t10y2y)
 
     strat_ret = simulate(positions, prices)
     strat_ret_net = apply_costs(strat_ret, positions, TRANSACTION_COST_BP)
@@ -252,8 +290,11 @@ def main():
     print(f"\nYears beating SPY: {(excess_yearly > 0).sum()}/{len(excess_yearly)} ({win_rate * 100:.0f}%)")
 
     pos_df = pd.DataFrame(
-        [(d, e, p["signal"], p["asset"], p["leverage"], p["risk_score"]) for d, e, p in positions],
-        columns=["decision_date", "period_end", "signal", "asset", "leverage", "risk_score"],
+        [(d, e, p["signal"], p["asset"], p["leverage"], p["risk_score"],
+          p["canaries"]["TIP"], p["canaries"]["EEM"], p["canaries"]["HYGIEF"], p["canaries"]["T10Y2Y"])
+         for d, e, p in positions],
+        columns=["decision_date", "period_end", "signal", "asset", "leverage", "risk_score",
+                 "canary_tip", "canary_eem", "canary_hygief", "canary_t10y2y"],
     )
     equity_df = pd.DataFrame(
         {"strategy_equity": strat_equity, "strategy_equity_net": strat_net_equity, "spy_equity": bench_equity}

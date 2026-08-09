@@ -1,15 +1,14 @@
-"""Current MQC-HAA 2x signal computation for the position page.
+"""Current MQC-HAA 2x signal for the position page.
 
-Recomputes the latest decision from live data (mirrors analyzer.py).
+Reads the latest decision from data/canary.db (backtest_positions) so the dashboard
+never re-downloads live data. Mirrors the backtest's monthly decision.
 """
 
-import pandas as pd
+import sqlite3
+from pathlib import Path
 
-from backtest import (
-    ASSET_CASH, ASSET_DEFENSE_LIST, ASSET_OFFENSE_LIST, GAP_THRESHOLD,
-    LEVERAGE_RISK_0, LEVERAGE_RISK_1, RISK_THRESHOLD, TICKER_EEM, TICKER_HYG,
-    TICKER_IEF, TICKER_TIP, load_data, momentum_13612w,
-)
+DATA_DIR = Path(__file__).parent / "data"
+DB_PATH = DATA_DIR / "canary.db"
 
 TICKER_KR = {
     "SPY": "S&P500", "QQQ": "나스닥", "IWM": "러셀2000", "EFA": "선진국",
@@ -19,87 +18,31 @@ TICKER_KR = {
 
 
 def get_current_signal():
-    prices = load_data()
-    hist = prices
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT decision_date, period_end, signal, asset, leverage, risk_score, "
+        "canary_tip, canary_eem, canary_hygief, canary_t10y2y "
+        "FROM backtest_positions ORDER BY decision_date DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
 
-    def _col(t: str) -> pd.Series:
-        return hist[t] if t in hist.columns else pd.Series(dtype=float)
+    if row is None:
+        return None
 
-    m_tip = momentum_13612w(_col(TICKER_TIP))
-    m_eem = momentum_13612w(_col(TICKER_EEM))
-    if TICKER_HYG in hist.columns and TICKER_IEF in hist.columns:
-        ratio = (hist[TICKER_HYG] / hist[TICKER_IEF]).ffill().bfill()
-        m_hief = momentum_13612w(ratio)
-    else:
-        m_hief = None
-
-    risk_tip = (m_tip is None) or (m_tip < 0)
-    risk_eem = (m_eem is None) or (m_eem < 0)
-    risk_hief = (m_hief is None) or (m_hief < 0)
-    risk_score = int(risk_tip) + int(risk_eem) + int(risk_hief)
-    is_risk_off = risk_score >= RISK_THRESHOLD
-
-    canaries = {
-        "TIP": {"score": m_tip, "risk": risk_tip},
-        "EEM": {"score": m_eem, "risk": risk_eem},
-        "HYGIEF": {"score": m_hief, "risk": risk_hief},
-    }
-
-    signal = asset = leverage = None
-    rank2_asset = rank2_score = None
-    defense_asset = defense_score = bil_score = gap = None
-
-    if not is_risk_off:
-        scores = {}
-        for t in ASSET_OFFENSE_LIST:
-            if t in hist.columns:
-                sc = momentum_13612w(hist[t])
-                if sc is not None:
-                    scores[t] = sc
-        if scores:
-            ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-            rank2_asset, rank2_score = ranked[1] if len(ranked) >= 2 else ranked[0]
-        if rank2_score is not None and rank2_score > 0:
-            if risk_score == 0:
-                signal, leverage = "RISK-ON 2x", LEVERAGE_RISK_0
-            else:
-                signal, leverage = "RISK-ON 1x", LEVERAGE_RISK_1
-            asset = rank2_asset
-            is_risk_off = False
-        else:
-            is_risk_off = True
-
-    if is_risk_off:
-        defense_scores = {}
-        for t in ASSET_DEFENSE_LIST:
-            if t in hist.columns:
-                sc = momentum_13612w(hist[t])
-                if sc is not None:
-                    defense_scores[t] = sc
-        if ASSET_CASH in hist.columns:
-            bil_score = momentum_13612w(hist[ASSET_CASH])
-        if defense_scores:
-            defense_asset, defense_score = max(defense_scores.items(), key=lambda x: x[1])
-        if defense_score is not None and bil_score is not None:
-            gap = defense_score - bil_score
-        signal = "RISK-OFF 1x"
-        leverage = 1.0
-        if gap is not None and gap >= GAP_THRESHOLD:
-            asset = defense_asset
-        else:
-            asset = ASSET_CASH
+    (decision_date, period_end, signal, asset, leverage, risk_score,
+     canary_tip, canary_eem, canary_hygief, canary_t10y2y) = row
 
     return {
-        "date": hist.index[-1].strftime("%Y-%m-%d"),
+        "decision_date": decision_date,
+        "period_end": period_end,
         "signal": signal,
         "asset": asset,
         "leverage": leverage,
         "risk_score": risk_score,
-        "canaries": canaries,
-        "rank2_asset": rank2_asset,
-        "rank2_score": rank2_score,
-        "defense_asset": defense_asset,
-        "defense_score": defense_score,
-        "bil_score": bil_score,
-        "gap": gap,
+        "canaries": {
+            "TIP": {"score": canary_tip, "risk": (canary_tip is None) or (canary_tip < 0)},
+            "EEM": {"score": canary_eem, "risk": (canary_eem is None) or (canary_eem < 0)},
+            "HYGIEF": {"score": canary_hygief, "risk": (canary_hygief is None) or (canary_hygief < 0)},
+            "T10Y2Y": {"score": canary_t10y2y, "risk": (canary_t10y2y is None) or (canary_t10y2y < 0)},
+        },
     }
