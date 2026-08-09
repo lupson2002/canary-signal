@@ -182,13 +182,16 @@ def build_positions(prices: pd.DataFrame, t10y2y: pd.Series):
     return positions
 
 
-def simulate(positions, prices):
-    """Daily return path (leverage applied to the held asset over the holding month)."""
+def simulate(positions, prices, force_1x=False):
+    """Daily return path (leverage applied to the held asset over the holding month).
+
+    force_1x=True ignores the strategy leverage and holds at 1.0x (for the 1x view).
+    """
     returns = prices.pct_change()
     daily_ret = pd.Series(0.0, index=prices.index)
     for decision_date, period_end, dec in positions:
         asset = dec["asset"]
-        lev = dec["leverage"]
+        lev = 1.0 if force_1x else dec["leverage"]
         if asset not in returns.columns:
             continue
         mask = (returns.index > decision_date) & (returns.index <= period_end)
@@ -262,22 +265,26 @@ def main():
     prices, t10y2y = load_data()
     positions = build_positions(prices, t10y2y)
 
-    strat_ret = simulate(positions, prices)
+    strat_ret = simulate(positions, prices)          # 전략 레버리지 (2x/1x)
+    strat_ret_1x = simulate(positions, prices, force_1x=True)  # 1x 고정
     strat_ret_net = apply_costs(strat_ret, positions, TRANSACTION_COST_BP)
+    strat_ret_1x_net = apply_costs(strat_ret_1x, positions, TRANSACTION_COST_BP)
     returns = prices.pct_change()
     bench_ret = returns["SPY"].loc[strat_ret.index]
 
     strat_stats, strat_equity = perf_stats(strat_ret)
     strat_net_stats, strat_net_equity = perf_stats(strat_ret_net)
+    strat_1x_stats, strat_1x_equity = perf_stats(strat_ret_1x)
+    strat_1x_net_stats, strat_1x_net_equity = perf_stats(strat_ret_1x_net)
     bench_stats, bench_equity = perf_stats(bench_ret)
 
     n_changes = sum(1 for _, t in compute_turnover(positions) if t > 0)
     print(f"Backtest period: {strat_ret.index.min().date()} ~ {strat_ret.index.max().date()} ({len(positions)} daily decisions, {n_changes} position changes)")
 
-    header = f"{'metric':<24}{'Strategy (gross)':>18}{f'Strategy (net {TRANSACTION_COST_BP}bp)':>22}{'SPY B&H':>12}"
+    header = f"{'metric':<24}{'1x gross':>12}{'1x net':>12}{'2x gross':>12}{'2x net':>12}{'SPY':>10}"
     print(header)
     for k in strat_stats:
-        print(f"{k:<24}{strat_stats[k]:>18.3f}{strat_net_stats[k]:>22.3f}{bench_stats[k]:>12.3f}")
+        print(f"{k:<24}{strat_1x_stats[k]:>12.3f}{strat_1x_net_stats[k]:>12.3f}{strat_stats[k]:>12.3f}{strat_net_stats[k]:>12.3f}{bench_stats[k]:>10.3f}")
 
     strat_yearly = yearly_returns(strat_ret)
     bench_yearly = yearly_returns(bench_ret)
@@ -297,12 +304,18 @@ def main():
                  "canary_tip", "canary_eem", "canary_hygief", "canary_t10y2y"],
     )
     equity_df = pd.DataFrame(
-        {"strategy_equity": strat_equity, "strategy_equity_net": strat_net_equity, "spy_equity": bench_equity}
+        {"strategy_equity": strat_equity, "strategy_equity_net": strat_net_equity,
+         "strategy_equity_1x": strat_1x_equity, "strategy_equity_1x_net": strat_1x_net_equity,
+         "spy_equity": bench_equity}
     )
     yearly_df = pd.DataFrame({"strategy": strat_yearly, "spy": bench_yearly, "excess": excess_yearly}).reset_index(names="year")
     weights_df = build_weights_df(positions, strat_ret.index)
 
-    daily_ret_df = pd.DataFrame({"strategy_ret": strat_ret, "spy_ret": bench_ret})
+    daily_ret_df = pd.DataFrame(
+        {"strategy_ret": strat_ret, "strategy_ret_net": strat_ret_net,
+         "strategy_ret_1x": strat_ret_1x, "strategy_ret_1x_net": strat_ret_1x_net,
+         "spy_ret": bench_ret}
+    )
     turnover_df = pd.DataFrame(compute_turnover(positions), columns=["decision_date", "turnover"])
     turnover_df = turnover_df[turnover_df["turnover"] > 0]
 

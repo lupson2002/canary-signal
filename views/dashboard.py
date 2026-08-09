@@ -74,20 +74,26 @@ def yearly_returns(ret):
 st.markdown("<style>div.block-container { padding-top: 2.6rem; }</style>", unsafe_allow_html=True)
 
 daily, turnover, weights = load_data()
-zero_ret = daily["strategy_ret"]
 bench_ret = daily["spy_ret"]
-zero_eq, bench_eq = equity_curve(zero_ret), equity_curve(bench_ret)
-zero_stats, bench_stats = perf_stats(zero_ret, zero_eq), perf_stats(bench_ret, bench_eq)
-zero_yearly, bench_yearly = yearly_returns(zero_ret), yearly_returns(bench_ret)
+bench_eq = equity_curve(bench_ret)
+bench_stats = perf_stats(bench_ret, bench_eq)
+bench_yearly = yearly_returns(bench_ret)
 
 with st.sidebar:
     st.markdown("**편도 매매비용(%)**")
-    cost_pct = st.number_input("%", min_value=0.0, max_value=5.0, value=0.3, step=0.05, label_visibility="collapsed")
+    cost_pct = st.number_input("%", min_value=0.0, max_value=5.0, value=0.1, step=0.05, label_visibility="collapsed")
 
-net_ret = apply_cost(zero_ret, turnover, cost_pct)
-net_eq = equity_curve(net_ret)
-net_stats = perf_stats(net_ret, net_eq)
-net_yearly = yearly_returns(net_ret)
+# 1x / 2x 모두 계산
+ret_1x = daily["strategy_ret_1x"]
+ret_2x = daily["strategy_ret"]
+net_1x = apply_cost(ret_1x, turnover, cost_pct)
+net_2x = apply_cost(ret_2x, turnover, cost_pct)
+eq_1x = equity_curve(net_1x)
+eq_2x = equity_curve(net_2x)
+stats_1x = perf_stats(net_1x, eq_1x)
+stats_2x = perf_stats(net_2x, eq_2x)
+yearly_1x = yearly_returns(net_1x)
+yearly_2x = yearly_returns(net_2x)
 
 tab_chart, tab_stats, tab_rel, tab_yearly, tab_weights = st.tabs(
     ["그래프", "통계표", "상대성과", "연도별 수익률", "비중"]
@@ -96,13 +102,14 @@ tab_chart, tab_stats, tab_rel, tab_yearly, tab_weights = st.tabs(
 with tab_chart:
     fig1 = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.06)
     fig1.add_trace(go.Scatter(x=bench_eq.index, y=bench_eq, name="SPY", line=dict(color=SLATE, width=2)), row=1, col=1)
-    fig1.add_trace(go.Scatter(x=zero_eq.index, y=zero_eq, name="MQC-HAA 2x (0%)", line=dict(color=COPPER_DIM, width=1.4, dash="dot")), row=1, col=1)
-    fig1.add_trace(go.Scatter(x=net_eq.index, y=net_eq, name=f"MQC-HAA 2x ({cost_pct:.2f}%)", line=dict(color=COPPER, width=2)), row=1, col=1)
+    fig1.add_trace(go.Scatter(x=eq_1x.index, y=eq_1x, name=f"MQC-HAA 1x ({cost_pct:.2f}%)", line=dict(color=COPPER_DIM, width=1.6, dash="dot")), row=1, col=1)
+    fig1.add_trace(go.Scatter(x=eq_2x.index, y=eq_2x, name=f"MQC-HAA 2x ({cost_pct:.2f}%)", line=dict(color=COPPER, width=2)), row=1, col=1)
     fig1.update_yaxes(type="log", title="growth of $1", row=1, col=1)
 
-    bench_dd, net_dd = drawdown_of(bench_eq), drawdown_of(net_eq)
+    bench_dd, dd_1x, dd_2x = drawdown_of(bench_eq), drawdown_of(eq_1x), drawdown_of(eq_2x)
     fig1.add_trace(go.Scatter(x=bench_dd.index, y=bench_dd * 100, line=dict(color=SLATE, width=1), fill="tozeroy", fillcolor="rgba(61,90,115,0.15)", showlegend=False), row=2, col=1)
-    fig1.add_trace(go.Scatter(x=net_dd.index, y=net_dd * 100, line=dict(color=COPPER, width=1), fill="tozeroy", fillcolor="rgba(187,107,44,0.18)", showlegend=False), row=2, col=1)
+    fig1.add_trace(go.Scatter(x=dd_1x.index, y=dd_1x * 100, line=dict(color=COPPER_DIM, width=1), fill="tozeroy", fillcolor="rgba(211,165,120,0.15)", showlegend=False), row=2, col=1)
+    fig1.add_trace(go.Scatter(x=dd_2x.index, y=dd_2x * 100, line=dict(color=COPPER, width=1), fill="tozeroy", fillcolor="rgba(187,107,44,0.18)", showlegend=False), row=2, col=1)
     fig1.update_yaxes(title="drawdown %", row=2, col=1)
     fig1.update_layout(height=560, margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02), hovermode="x unified", plot_bgcolor="rgba(0,0,0,0)")
     st.plotly_chart(fig1, width="stretch")
@@ -119,37 +126,41 @@ with tab_stats:
 
     stats_df = pd.DataFrame({
         "SPY": {k: fmt_metric(k, bench_stats[k]) for k in metric_order},
-        "Strategy (0%)": {k: fmt_metric(k, zero_stats[k]) for k in metric_order},
-        f"Strategy ({cost_pct:.2f}%)": {k: fmt_metric(k, net_stats[k]) for k in metric_order},
+        f"MQC-HAA 1x ({cost_pct:.2f}%)": {k: fmt_metric(k, stats_1x[k]) for k in metric_order},
+        f"MQC-HAA 2x ({cost_pct:.2f}%)": {k: fmt_metric(k, stats_2x[k]) for k in metric_order},
     })
     st.dataframe(stats_df, width="stretch")
 
 with tab_rel:
-    ratio = net_eq / bench_eq
-    ratio_dd = drawdown_of(ratio)
+    ratio_1x = eq_1x / bench_eq
+    ratio_2x = eq_2x / bench_eq
     fig3 = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.65, 0.35], vertical_spacing=0.06)
-    fig3.add_trace(go.Scatter(x=ratio.index, y=ratio, line=dict(color=COPPER, width=2), showlegend=False), row=1, col=1)
+    fig3.add_trace(go.Scatter(x=ratio_1x.index, y=ratio_1x, name="1x / SPY", line=dict(color=COPPER_DIM, width=1.6, dash="dot")), row=1, col=1)
+    fig3.add_trace(go.Scatter(x=ratio_2x.index, y=ratio_2x, name="2x / SPY", line=dict(color=COPPER, width=2)), row=1, col=1)
     fig3.update_yaxes(type="log", tickformat=".1f", ticksuffix="x", title="Strategy / SPY", row=1, col=1)
-    fig3.add_trace(go.Scatter(x=ratio_dd.index, y=ratio_dd * 100, line=dict(color=COPPER, width=1), fill="tozeroy", fillcolor="rgba(187,107,44,0.18)", showlegend=False), row=2, col=1)
+    ratio_dd_1x, ratio_dd_2x = drawdown_of(ratio_1x), drawdown_of(ratio_2x)
+    fig3.add_trace(go.Scatter(x=ratio_dd_1x.index, y=ratio_dd_1x * 100, line=dict(color=COPPER_DIM, width=1), fill="tozeroy", fillcolor="rgba(211,165,120,0.15)", showlegend=False), row=2, col=1)
+    fig3.add_trace(go.Scatter(x=ratio_dd_2x.index, y=ratio_dd_2x * 100, line=dict(color=COPPER, width=1), fill="tozeroy", fillcolor="rgba(187,107,44,0.18)", showlegend=False), row=2, col=1)
     fig3.update_yaxes(title="상대낙폭 %", row=2, col=1)
     fig3.update_layout(height=480, margin=dict(l=10, r=10, t=10, b=10), hovermode="x unified", plot_bgcolor="rgba(0,0,0,0)")
     st.plotly_chart(fig3, width="stretch")
 
 with tab_yearly:
-    years = sorted(zero_yearly.index)
+    years = sorted(yearly_1x.index)
     yearly_df = pd.DataFrame({
         "연도": years,
         "SPY": [bench_yearly.get(y, 0) * 100 for y in years],
-        "Strategy (0%)": [zero_yearly.get(y, 0) * 100 for y in years],
-        f"Strategy ({cost_pct:.2f}%)": [net_yearly.get(y, 0) * 100 for y in years],
+        f"MQC-HAA 1x ({cost_pct:.2f}%)": [yearly_1x.get(y, 0) * 100 for y in years],
+        f"MQC-HAA 2x ({cost_pct:.2f}%)": [yearly_2x.get(y, 0) * 100 for y in years],
     })
-    yearly_df["초과수익"] = yearly_df[f"Strategy ({cost_pct:.2f}%)"] - yearly_df["SPY"]
+    yearly_df["1x 초과수익"] = yearly_df[f"MQC-HAA 1x ({cost_pct:.2f}%)"] - yearly_df["SPY"]
+    yearly_df["2x 초과수익"] = yearly_df[f"MQC-HAA 2x ({cost_pct:.2f}%)"] - yearly_df["SPY"]
 
     def color_excess(v):
         return f"color: {GOOD}" if v >= 0 else f"color: {BAD}"
 
     st.dataframe(
-        yearly_df.style.format({c: "{:.1f}%" for c in yearly_df.columns if c != "연도"}).map(color_excess, subset=["초과수익"]),
+        yearly_df.style.format({c: "{:.1f}%" for c in yearly_df.columns if c != "연도"}).map(color_excess, subset=["1x 초과수익", "2x 초과수익"]),
         width="stretch", hide_index=True,
     )
 
