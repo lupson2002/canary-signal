@@ -1,0 +1,19 @@
+[Unit]
+Description=2/4 카나리아 앙상블 전략 데일리 텔레그램 봇
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mikey
+WorkingDirectory=/home/mikey/카나리아시그널
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Asia/Seoul
+ExecStart=/home/mikey/카나리아시그널/.venv/bin/python /home/mikey/카나리아시그널/main.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

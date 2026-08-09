@@ -1,0 +1,24 @@
+# 환경·시크릿 (커밋 금지)
+.env
+*.pem
+*.key
+*.p12
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# 생성 데이터·산출물 (코드 아님) — 단, 대시보드용 DB는 커밋
+data/*
+!data/canary.db
+logs/
+latest_signal.json
+*.log
+*.log.*
+*.gz
+
+# 로컬 도구 상태
+.ijfw/
